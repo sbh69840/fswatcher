@@ -11,13 +11,13 @@ import Data.Foldable (for_)
 import Data.String (fromString)
 import Data.Traversable (for)
 import System.FSNotify (Event (..), StopListening, WatchManager, startManager,
-       stopManager, watchTree, watchDir, eventPath)
+       stopManager, watchTreeChan, watchDirChan, eventPath, EventChannel)
 import System.Exit (ExitCode (..), exitSuccess)
-import System.Process (createProcess, proc, waitForProcess)
+import System.Process (createProcess, proc, waitForProcess, cleanupProcess)
 import Control.Category
-import Control.Monad (void)
+import Control.Monad (void, forever)
 import System.Posix.Signals (installHandler, Handler(Catch), sigINT, sigTERM)
-import Control.Concurrent (forkIO, killThread)
+import Control.Concurrent (forkIO, killThread, newChan, readChan)
 import Control.Concurrent.MVar
 import Text.Regex.PCRE
 import Options.Applicative
@@ -36,13 +36,13 @@ data FileDetails = FileDetails { givenPath    :: FilePath
 -- put () in the MVar that acts as a run trigger. `tryPutMVar` is used to avoid
 -- re-running the command many times if the file/dir is changed more than once
 -- while the command is already running.
-watch :: WatchManager -> MVar () -> WatchOpt -> FileDetails -> IO StopListening
-watch m trigger opt fileDetails = do
+watch :: WatchManager -> EventChannel -> WatchOpt -> FileDetails -> IO StopListening
+watch m chan opt fileDetails = do
   let path = expandedPath fileDetails
   let watchFun = case filetype fileDetails of
-                   Directory -> watchTree m path (matchFiles opt)
-                   File      -> watchDir  m (encodeString $ directory $ decodeString path) isThisFile
-   in watchFun (\_ -> void $ tryPutMVar trigger ())
+                   Directory -> watchTreeChan m path (matchFiles opt)
+                   File      -> watchDirChan  m (encodeString $ directory $ decodeString path) isThisFile
+   in watchFun chan
 
   where isThisFile :: Event -> Bool
         isThisFile (Modified p _ _) = p == fromString (expandedPath fileDetails)
@@ -55,16 +55,22 @@ watch m trigger opt fileDetails = do
                                 (null includes || p =~ includePath wo)
                                 && (null excludes || not (p =~ excludePath wo))
 
-runCmd :: String -> [String] -> MVar () -> IO ()
-runCmd cmd args trigger = do
-  _ <- takeMVar trigger
+runCmd :: String -> [String] -> EventChannel -> IO ()
+runCmd cmd args chan = do
+  _ <- readChan chan
   putStrLn $ "Running " ++ cmd ++ " " ++ unwords args ++  "..."
-  (_, _, _, ph) <- createProcess (proc cmd args)
+  p@(_, _, _, ph) <- createProcess (proc cmd args)
+
+  void $ forkIO $ forever $ do
+    _ <- readChan chan
+    putStrLn "=================== Killing the process"
+    void $ cleanupProcess p
+
   exitCode <- waitForProcess ph
   hPutStrLn stderr $ case exitCode of
                        ExitSuccess   -> "Process completed successfully"
                        ExitFailure n -> "Process returned " ++ show n
-  runCmd cmd args trigger
+  runCmd cmd args chan
 
 runWatch :: WatchOpt -> IO ()
 runWatch opt = do
@@ -95,9 +101,10 @@ runWatch opt = do
   let pipeline = if delay > 0 then throttle delay else id
 
   inputMVar <- newEmptyMVar
-  (pipelineThreads, outputMVar) <- runPipeline pipeline inputMVar
-  runThread <- forkIO $ runCmd cmd args outputMVar
-  stopWatchers <- sequence_ <$> traverse (watch m inputMVar opt) allFileDetails
+  chan <- newChan
+  (pipelineThreads, _outputMVar) <- runPipeline pipeline inputMVar
+  runThread <- forkIO $ runCmd cmd args chan
+  stopWatchers <- sequence_ <$> traverse (watch m chan opt) allFileDetails
 
   let allThreads = runThread : pipelineThreads
 
