@@ -4,7 +4,7 @@ import Prelude hiding (id, (.))
 
 import System.IO (hPutStrLn, stderr)
 import System.Posix.Files (getFileStatus, isDirectory)
-import System.Directory (canonicalizePath, getCurrentDirectory)
+import System.Directory (canonicalizePath, getCurrentDirectory, doesDirectoryExist)
 import Filesystem.Path ((</>), directory)
 import Filesystem.Path.CurrentOS (decodeString, encodeString)
 import Data.Foldable (for_)
@@ -13,7 +13,7 @@ import Data.Traversable (for)
 import System.FSNotify (Event (..), StopListening, WatchManager, startManager,
        stopManager, watchTree, watchDir, eventPath)
 import System.Exit (ExitCode (..), exitSuccess)
-import System.Process (createProcess, proc, waitForProcess)
+import System.Process (createProcess, proc, waitForProcess, cleanupProcess, interruptProcessGroupOf, terminateProcess)
 import Control.Category
 import Control.Monad (void)
 import System.Posix.Signals (installHandler, Handler(Catch), sigINT, sigTERM)
@@ -55,16 +55,20 @@ watch m trigger opt fileDetails = do
                                 (null includes || p =~ includePath wo)
                                 && (null excludes || not (p =~ excludePath wo))
 
-runCmd :: String -> [String] -> MVar () -> IO ()
-runCmd cmd args trigger = do
-  _ <- takeMVar trigger
+runCmd :: String -> [String] -> MVar () -> MVar ()  -> IO ()
+runCmd cmd args trigger runTrigger = do
+  stopTrigger <- newEmptyMVar
+  void $ forkIO $ do
+    _ <- takeMVar trigger
+    putMVar stopTrigger ()
+
+  _ <- takeMVar runTrigger
   putStrLn $ "Running " ++ cmd ++ " " ++ unwords args ++  "..."
   (_, _, _, ph) <- createProcess (proc cmd args)
-  exitCode <- waitForProcess ph
-  hPutStrLn stderr $ case exitCode of
-                       ExitSuccess   -> "Process completed successfully"
-                       ExitFailure n -> "Process returned " ++ show n
-  runCmd cmd args trigger
+  _ <- takeMVar stopTrigger
+  terminateProcess ph
+  putMVar runTrigger ()
+  runCmd cmd args trigger runTrigger
 
 runWatch :: WatchOpt -> IO ()
 runWatch opt = do
@@ -95,8 +99,9 @@ runWatch opt = do
   let pipeline = if delay > 0 then throttle delay else id
 
   inputMVar <- newEmptyMVar
+  runTrigger <- newMVar ()
   (pipelineThreads, outputMVar) <- runPipeline pipeline inputMVar
-  runThread <- forkIO $ runCmd cmd args outputMVar
+  runThread <- forkIO $ runCmd cmd args outputMVar runTrigger
   stopWatchers <- sequence_ <$> traverse (watch m inputMVar opt) allFileDetails
 
   let allThreads = runThread : pipelineThreads
