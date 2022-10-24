@@ -13,7 +13,7 @@ import Data.Traversable (for)
 import System.FSNotify (Event (..), StopListening, WatchManager, startManager,
        stopManager, watchTree, watchDir, eventPath)
 import System.Exit (ExitCode (..), exitSuccess)
-import System.Process (createProcess, proc, waitForProcess)
+import System.Process (createProcess, proc, waitForProcess, terminateProcess)
 import Control.Category
 import Control.Monad (void)
 import System.Posix.Signals (installHandler, Handler(Catch), sigINT, sigTERM)
@@ -57,13 +57,10 @@ watch m trigger opt fileDetails = do
 
 runCmd :: String -> [String] -> MVar () -> IO ()
 runCmd cmd args trigger = do
-  _ <- takeMVar trigger
   putStrLn $ "Running " ++ cmd ++ " " ++ unwords args ++  "..."
   (_, _, _, ph) <- createProcess (proc cmd args)
-  exitCode <- waitForProcess ph
-  hPutStrLn stderr $ case exitCode of
-                       ExitSuccess   -> "Process completed successfully"
-                       ExitFailure n -> "Process returned " ++ show n
+  _ <- takeMVar trigger
+  terminateProcess ph
   runCmd cmd args trigger
 
 runWatch :: WatchOpt -> IO ()
