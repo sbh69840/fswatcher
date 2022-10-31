@@ -15,7 +15,7 @@ import System.FSNotify (Event (..), StopListening, WatchManager, startManager,
 import System.Exit (ExitCode (..), exitSuccess)
 import System.Process (createProcess, proc, waitForProcess, terminateProcess)
 import Control.Category
-import Control.Monad (void)
+import Control.Monad (void, forever, when)
 import System.Posix.Signals (installHandler, Handler(Catch), sigINT, sigTERM)
 import Control.Concurrent (forkIO, killThread)
 import Control.Concurrent.MVar
@@ -24,6 +24,10 @@ import Options.Applicative
 
 import Opts
 import Pipeline
+
+import GHC.IO.Handle ( Handle )
+import System.IO (stdin, hReady)
+import Data.Functor ((<&>))
 
 data FileType = File | Directory deriving Eq
 
@@ -62,6 +66,15 @@ runCmd cmd args trigger = do
   _ <- takeMVar trigger
   terminateProcess ph
   runCmd cmd args trigger
+
+listen :: Handle -> IO Char -> MVar () -> IO ()
+listen hnd x trigger = hReady hnd >>= f
+   where f True = do
+                    res <- x
+                    when (res=='\n') $
+                      void $ tryPutMVar trigger ()
+                    return ()
+         f _    = return ()
 
 runWatch :: WatchOpt -> IO ()
 runWatch opt = do
@@ -110,7 +123,7 @@ runWatch opt = do
                   then ""
                   else " (→ " ++ canonicalPath ++ ")"
   putStrLn "Press ^C to stop."
-
+  void $ forkIO $ forever $ listen stdin getChar outputMVar
   _ <- readMVar interrupted
   putStrLn "\nStopping."
   stopWatchers
