@@ -1,43 +1,29 @@
-# SPDX-FileCopyrightText: 2021 Serokell <https://serokell.io/>
-#
-# SPDX-License-Identifier: CC0-1.0
-
 {
-  description = "fswatcher: run a command on any file change";
-
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs";
-    flake-utils.url = "github:numtide/flake-utils";
+    nixpkgs.url = "github:nixos/nixpkgs/nixpkgs-unstable";
+    flake-parts.url = "github:hercules-ci/flake-parts";
+    haskell-flake.url = "github:srid/haskell-flake";
   };
-
-  outputs = { self, nixpkgs, flake-utils }:
-    flake-utils.lib.eachSystem ["x86_64-darwin"](system:
-      let
-        pkgs = nixpkgs.legacyPackages.${system};
-
-        haskellPackages = pkgs.haskellPackages;
-
-        jailbreakUnbreak = pkg:
-          pkgs.haskell.lib.doJailbreak (pkg.overrideAttrs (_: { meta = { }; }));
-
-        packageName = "fswatcher";
-      in {
-        packages.${packageName} =
-          haskellPackages.callCabal2nix packageName self rec {
-            # Dependency overrides go here
+  outputs = inputs@{ self, nixpkgs, flake-parts, ... }:
+    flake-parts.lib.mkFlake { inherit inputs; } {
+      systems = nixpkgs.lib.systems.flakeExposed;
+      imports = [ inputs.haskell-flake.flakeModule ];
+      perSystem = { self', pkgs, ... }: {
+        haskellProjects.default = {
+          packages = {
+            # You can add more than one local package here.
+            fswatcher.root = ./.; # Assumes ./example.cabal
           };
-
-        packages.default = self.packages.${system}.${packageName};
-
-        devShells.default = haskellPackages.shellFor {
-          packages = p:[
-            p.fswatcher
-          ];
-          buildInputs = with haskellPackages; [
-            haskellPackages.haskell-language-server # you must build it with your ghc to work
-            ghcid
-            cabal-install
-          ];
+          # overrides = self: super: { };
+          devShell = {
+           enable = true;  # Enabled by default
+           tools = hp: { fourmolu = hp.fourmolu; ghcid = null; };
+           hlintCheck.enable = true;
+           hlsCheck.enable = true;
+          };
         };
-      });
+        # haskell-flake doesn't set the default package, but you can do it here.
+        packages.default = self'.packages.fswatcher;
+      };
+    };
 }
